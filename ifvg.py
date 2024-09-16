@@ -77,12 +77,15 @@ def calculate_atr(df, period=200):
 
 # FVG/IFVG Detection Version 2, to detect every single IFVG within the scope of the chart
 # Version 3: taking into account of candle stick wicks
-def detect_ifvg_with_gap_fill(df, atr_multiplier=0.25, lookback=50):
+def detect_ifvg_with_true_false_flag(df, atr_multiplier=0.25, lookback=5):
     atr = calculate_atr(df, period=200).fillna(0) * atr_multiplier
 
     bull_fvg = []  # To track bullish FVGs
     bear_fvg = []  # To track bearish FVGs
     inversions = []  # To store IFVGs
+
+    # Initialize a column to track if an IFVG is detected (True/False)
+    df['IFVG_Detected'] = False
 
     # Use range(len(df)) to loop over DataFrame by row index
     for i in range(lookback, len(df)):
@@ -91,7 +94,7 @@ def detect_ifvg_with_gap_fill(df, atr_multiplier=0.25, lookback=50):
         low_value = df['Low'].iloc[i]
 
         # Bullish FVG: Low (current bar) > High (2 bars ago)
-        if (low_value > df['High'].iloc[i - 2]):
+        if low_value > df['High'].iloc[i - 2]:
             # Ensure the gap size is significant using ATR as a filter
             if abs(low_value - df['High'].iloc[i - 2]) > atr.iloc[i]:
                 bull_fvg.append({
@@ -105,7 +108,7 @@ def detect_ifvg_with_gap_fill(df, atr_multiplier=0.25, lookback=50):
                 })
 
         # Bearish FVG: High (current bar) < Low (2 bars ago)
-        if (high_value < df['Low'].iloc[i - 2]):
+        if high_value < df['Low'].iloc[i - 2]:
             if abs(df['Low'].iloc[i - 2] - high_value) > atr.iloc[i]:
                 bear_fvg.append({
                     'left_time': df.index[i - 1],  # The bar creating the FVG
@@ -126,6 +129,7 @@ def detect_ifvg_with_gap_fill(df, atr_multiplier=0.25, lookback=50):
                 fvg['state'] = 1  # Mark as inverted
                 fvg['direction'] = -1  # Reverse the direction
                 inversions.append(fvg)  # Store the IFVG
+                df.at[df.index[i], 'IFVG_Detected'] = True  # Mark as True in the DataFrame
                 bull_fvg.remove(fvg)  # Remove it from the list once inverted
 
         # Bearish IFVG check: Price *must fully enter and cross the gap* above the FVG high
@@ -136,25 +140,33 @@ def detect_ifvg_with_gap_fill(df, atr_multiplier=0.25, lookback=50):
                 fvg['state'] = 1  # Mark as inverted
                 fvg['direction'] = 1  # Reverse the direction
                 inversions.append(fvg)  # Store the IFVG
+                df.at[df.index[i], 'IFVG_Detected'] = True  # Mark as True in the DataFrame
                 bear_fvg.remove(fvg)  # Remove it from the list once inverted
 
-    # Return all inversions (IFVGs) detected
-    return inversions
+    # Return the modified DataFrame with True/False IFVG detection flag and the list of inversions
+    return df, inversions
 
 
+# Example usage:
 # Download 5-minute data for the last 5 days
 gld = yf.download("GC=F", interval='5m', period='5d')
 
-# Run FVG/IFVG detection and return all simple IFVGs
-simple_inversions = detect_ifvg_with_gap_fill(gld)
+# Run the IFVG detection function with True/False flag
+gld_with_ifvg, ifvgs = detect_ifvg_with_true_false_flag(gld)
 
-# Output all IFVGs detected in the 5-day period
-if simple_inversions:
+# Check if any IFVGs were detected
+if ifvgs:
     print("IFVGs detected:")
-    for inv in simple_inversions:
+    for inv in ifvgs:
         print(f"IFVG detected at {inv['inversion_time']}")
 else:
     print("No IFVGs detected.")
+
+# Example usage for trading: Check if an IFVG was detected in the most recent bar
+if gld_with_ifvg['IFVG_Detected'].iloc[-1]:
+    print("IFVG detected in the most recent bar!")
+else:
+    print("No IFVG in the most recent bar.")
 
 
 # Define session start and end times
@@ -198,32 +210,65 @@ for idx, row in gld.iterrows():
             gld.at[idx, 'NewYork_Low'] = ny_low
             ny_high, ny_low = 0, float('inf')  # Reset
 
-# Forward fill NaN values to maintain continuous session lines
-gld['London_High'].ffill(inplace=True)
-gld['London_Low'].ffill(inplace=True)
-gld['NewYork_High'].ffill(inplace=True)
-gld['NewYork_Low'].ffill(inplace=True)
 
-# Plot the original OHLC and the London/New York session high/low
-plt.figure(figsize=(14, 7))
+# Long Condition Check
+def check_long_condition(df):
+    """
+    Checks if the long condition is met:
+    - Price is below the macro level (e.g., previous London/NY session low).
+    - An IFVG (Inversion Fair Value Gap) is detected.
 
-# Plot OHLC data
-plt.plot(gld.index, gld['Close'], label='Close Price', color='blue')
+    Args:
+    df (pd.DataFrame): The DataFrame containing the price data, macro levels,
+                       and IFVG detection column.
 
-# Plot London session highs and lows
-plt.plot(gld.index, gld['London_High'], label='London High', color='green', linestyle='--')
-plt.plot(gld.index, gld['London_Low'], label='London Low', color='red', linestyle='--')
+    Returns:
+    pd.DataFrame: The DataFrame with an additional column 'Long_Condition_Met' (True/False).
+    """
+    # Initialize a new column to store whether the long condition is met (True/False)
+    df['Long_Condition_Met'] = False
 
-# Plot New York session highs and lows
-plt.plot(gld.index, gld['NewYork_High'], label='New York High', color='orange', linestyle='-.')
-plt.plot(gld.index, gld['NewYork_Low'], label='New York Low', color='purple', linestyle='-.')
+    # Loop through the DataFrame and check the long condition for each row
+    for i in range(len(df)):
+        # Example: Check if price is below both the previous session lows (London/NY) and IFVG is detected
+        if df['Close'].iloc[i] < df['London_Low'].iloc[i] and df['IFVG_Detected'].iloc[i]:
+            df.at[df.index[i], 'Long_Condition_Met'] = True  # Mark the long condition as True
 
-# Add labels and legend
-plt.title('Gold Futures (GC=F) - 5-Minute OHLC with London & New York Session Highs and Lows')
-plt.xlabel('Datetime')
-plt.ylabel('Price')
-plt.legend()
-plt.grid(True)
+    return df
 
-# Show the plot
-plt.show()
+
+# Run the long condition check
+gld_with_long_condition = check_long_condition(gld_with_ifvg)
+
+# Output the DataFrame to review the results
+print(gld_with_long_condition[['Close', 'London_Low', 'IFVG_Detected', 'Long_Condition_Met']])
+
+# # Forward fill NaN values to maintain continuous session lines
+# gld['London_High'].ffill(inplace=True)
+# gld['London_Low'].ffill(inplace=True)
+# gld['NewYork_High'].ffill(inplace=True)
+# gld['NewYork_Low'].ffill(inplace=True)
+#
+# # Plot the original OHLC and the London/New York session high/low
+# plt.figure(figsize=(14, 7))
+#
+# # Plot OHLC data
+# plt.plot(gld.index, gld['Close'], label='Close Price', color='blue')
+#
+# # Plot London session highs and lows
+# plt.plot(gld.index, gld['London_High'], label='London High', color='green', linestyle='--')
+# plt.plot(gld.index, gld['London_Low'], label='London Low', color='red', linestyle='--')
+#
+# # Plot New York session highs and lows
+# plt.plot(gld.index, gld['NewYork_High'], label='New York High', color='orange', linestyle='-.')
+# plt.plot(gld.index, gld['NewYork_Low'], label='New York Low', color='purple', linestyle='-.')
+#
+# # Add labels and legend
+# plt.title('Gold Futures (GC=F) - 5-Minute OHLC with London & New York Session Highs and Lows')
+# plt.xlabel('Datetime')
+# plt.ylabel('Price')
+# plt.legend()
+# plt.grid(True)
+#
+# # Show the plot
+# plt.show()A
