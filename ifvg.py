@@ -1,54 +1,171 @@
 import numpy as np
 import pandas as pd
-import pandas_datareader as pdr
-import matplotlib.pyplot as plt
 import yfinance as yf
 from datetime import datetime
 
-gld = yf.download("GC=F")
-day = np.arange(1, len(gld) + 1)
-gld['Day'] = day
-gld.drop(columns=['Volume', 'Adj Close'], inplace=True)
 
-chart_date = gld.index[1]  # this is to get the date in the dataframe from the first column
+# Function to calculate ATR
+def calculate_atr(df, period=200):
+    high_low = df['High'] - df['Low']
+    high_close = np.abs(df['High'] - df['Close'].shift(1))
+    low_close = np.abs(df['Low'] - df['Close'].shift(1))
 
-# Initialize empty lists to store the timestamps for each row
-london_times = []
-new_york1_times = []
-new_york3_times = []
-new_york4_times = []
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    atr = tr.rolling(window=period).mean()
+    return atr
 
-# Loop over each date in the DataFrame
-for chart_date in gld.index:
-    # Extract year, month, and day from the chart's date
-    year = chart_date.year
-    month = chart_date.month
-    dayofmonth = chart_date.day
 
-    # Create timestamps for each time slot
-    londonStartTime = datetime(year, month, dayofmonth, 2, 33)
-    londonEndTime = datetime(year, month, dayofmonth, 3, 0)
+# FVG/IFVG Detection
+def detect_fvg_ifvg(df, atr_multiplier=0.25, lookback=5, signal_preference='Close'):
+    atr = calculate_atr(df, period=200).fillna(0) * atr_multiplier
 
-    newYork1StartTime = datetime(year, month, dayofmonth, 8, 50)
-    newYork1EndTime = datetime(year, month, dayofmonth, 9, 10)
+    bull_fvg = []
+    bear_fvg = []
+    inversions = []
 
-    newYork3StartTime = datetime(year, month, dayofmonth, 13, 10)
-    newYork3EndTime = datetime(year, month, dayofmonth, 13, 40)
+    # Loop through the DataFrame rows
+    for i, row in df.iterrows():
+        if i < lookback:
+            continue  # Skip rows until lookback period is reached
 
-    newYork4StartTime = datetime(year, month, dayofmonth, 15, 15)
-    newYork4EndTime = datetime(year, month, dayofmonth, 15, 45)
+        # FVG Up (Bullish) Condition
+        if (df['Low'].iloc[i] > df['High'].iloc[i - 2]) and (df['Close'].iloc[i - 1] > df['High'].iloc[i - 2]):
+            if abs(df['Low'].iloc[i] - df['High'].iloc[i - 2]) > atr.iloc[i]:
+                bull_fvg.append({
+                    'left_time': df.index[i - 1],
+                    'right_time': df.index[i],
+                    'low': df['Low'].iloc[i],
+                    'high': df['High'].iloc[i - 2],
+                    'mid': (df['Low'].iloc[i] + df['High'].iloc[i - 2]) / 2,
+                    'direction': 1,  # bullish
+                    'state': 0
+                })
 
-    # Store the timestamps in their respective lists
-    london_times.append((londonStartTime, londonEndTime))
-    new_york1_times.append((newYork1StartTime, newYork1EndTime))
-    new_york3_times.append((newYork3StartTime, newYork3EndTime))
-    new_york4_times.append((newYork4StartTime, newYork4EndTime))
+        # FVG Down (Bearish) Condition
+        if (df['High'].iloc[i] < df['Low'].iloc[i - 2]) and (df['Close'].iloc[i - 1] < df['Low'].iloc[i - 2]):
+            if abs(df['Low'].iloc[i - 2] - df['High'].iloc[i]) > atr.iloc[i]:
+                bear_fvg.append({
+                    'left_time': df.index[i - 1],
+                    'right_time': df.index[i],
+                    'low': df['Low'].iloc[i - 2],
+                    'high': df['High'].iloc[i],
+                    'mid': (df['High'].iloc[i] + df['Low'].iloc[i - 2]) / 2,
+                    'direction': -1,  # bearish
+                    'state': 0
+                })
 
-# Convert the lists to DataFrame columns if needed
-gld['LondonStartTime'], gld['LondonEndTime'] = zip(*london_times)
-gld['NewYork1StartTime'], gld['NewYork1EndTime'] = zip(*new_york1_times)
-gld['NewYork3StartTime'], gld['NewYork3EndTime'] = zip(*new_york3_times)
-gld['NewYork4StartTime'], gld['NewYork4EndTime'] = zip(*new_york4_times)
+        # Check for inversions (IFVG)
+        for fvg in bull_fvg[:]:
+            if df['Low'].iloc[i] < fvg['low']:  # Inversion in bullish FVG
+                fvg['inversion_time'] = df.index[i]
+                fvg['state'] = 1  # Mark it as inverted
+                fvg['direction'] = -1  # Reverse the direction
+                inversions.append(fvg)
+                bull_fvg.remove(fvg)
 
-# Print the updated DataFrame with new time columns
-print(gld)
+        for fvg in bear_fvg[:]:
+            if df['High'].iloc[i] > fvg['high']:  # Inversion in bearish FVG
+                fvg['inversion_time'] = df.index[i]
+                fvg['state'] = 1  # Mark it as inverted
+                fvg['direction'] = 1  # Reverse the direction
+                inversions.append(fvg)
+                bear_fvg.remove(fvg)
+
+    # Check if there's any inversion on the last data point
+    if inversions and inversions[-1]['inversion_time'] == df.index[-1]:
+        return True  # Inversion detected at the latest bar
+    else:
+        return False  # No inversion detected
+
+
+# Example usage:
+# Download 5-minute data for the last 7 days
+gld = yf.download("GC=F", interval='5m', period='5d')
+
+# Run FVG/IFVG detection and check for IFVG at the latest bar
+if detect_fvg_ifvg(gld):
+    print("IFVG detected at the latest bar!")
+else:
+    print("No IFVG at the latest bar.")
+
+# Example usage:
+# Download 5-minute data for the last 7 days
+gld = yf.download("GC=F", interval='5m', period='5d')
+
+# Run FVG/IFVG detection and check for IFVG at the latest bar
+if detect_fvg_ifvg(gld):
+    print("IFVG detected at the latest bar!")
+else:
+    print("No IFVG at the latest bar.")
+
+
+# Define session start and end times
+def get_session_times(df, start_hour, start_min, end_hour, end_min, tz_info):
+    sessions = []
+    for date in df.index.date:
+        start_time = datetime(date.year, date.month, date.day, start_hour, start_min, tzinfo=tz_info)
+        end_time = datetime(date.year, date.month, date.day, end_hour, end_min, tzinfo=tz_info)
+        sessions.append((start_time, end_time))
+    return sessions
+
+
+# Create sessions times for London and New York
+tz_info = gld.index[0].tzinfo
+london_sessions = get_session_times(gld, 2, 33, 3, 0, tz_info)
+ny_sessions = get_session_times(gld, 8, 50, 9, 10, tz_info)
+
+# Initialize session highs/lows
+london_high, london_low, ny_high, ny_low = 0, float('inf'), 0, float('inf')
+gld['London_High'], gld['London_Low'], gld['NewYork_High'], gld['NewYork_Low'] = np.nan, np.nan, np.nan, np.nan
+
+# Loop through each 5-minute interval to capture highs/lows within sessions
+for idx, row in gld.iterrows():
+    current_time = idx
+
+    for london_start, london_end in london_sessions:
+        if london_start <= current_time <= london_end:
+            london_high = max(london_high, row['High'])
+            london_low = min(london_low, row['Low'])
+        elif current_time > london_end and london_high > 0:
+            gld.at[idx, 'London_High'] = london_high
+            gld.at[idx, 'London_Low'] = london_low
+            london_high, london_low = 0, float('inf')  # Reset
+
+    for ny_start, ny_end in ny_sessions:
+        if ny_start <= current_time <= ny_end:
+            ny_high = max(ny_high, row['High'])
+            ny_low = min(ny_low, row['Low'])
+        elif current_time > ny_end and ny_high > 0:
+            gld.at[idx, 'NewYork_High'] = ny_high
+            gld.at[idx, 'NewYork_Low'] = ny_low
+            ny_high, ny_low = 0, float('inf')  # Reset
+
+# Forward fill NaN values to maintain continuous session lines
+gld['London_High'].ffill(inplace=True)
+gld['London_Low'].ffill(inplace=True)
+gld['NewYork_High'].ffill(inplace=True)
+gld['NewYork_Low'].ffill(inplace=True)
+
+# # Plot the original OHLC and the London/New York session high/low
+# plt.figure(figsize=(14, 7))
+#
+# # Plot OHLC data
+# plt.plot(gld.index, gld['Close'], label='Close Price', color='blue')
+#
+# # Plot London session highs and lows
+# plt.plot(gld.index, gld['London_High'], label='London High', color='green', linestyle='--')
+# plt.plot(gld.index, gld['London_Low'], label='London Low', color='red', linestyle='--')
+#
+# # Plot New York session highs and lows
+# plt.plot(gld.index, gld['NewYork_High'], label='New York High', color='orange', linestyle='-.')
+# plt.plot(gld.index, gld['NewYork_Low'], label='New York Low', color='purple', linestyle='-.')
+#
+# # Add labels and legend
+# plt.title('Gold Futures (GC=F) - 5-Minute OHLC with London & New York Session Highs and Lows')
+# plt.xlabel('Datetime')
+# plt.ylabel('Price')
+# plt.legend()
+# plt.grid(True)
+#
+# # Show the plot
+# plt.show()
