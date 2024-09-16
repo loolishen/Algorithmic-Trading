@@ -77,7 +77,7 @@ def calculate_atr(df, period=200):
 
 # FVG/IFVG Detection Version 2, to detect every single IFVG within the scope of the chart
 # Version 3: taking into account of candle stick wicks
-def detect_ifvg_with_gap_fill(df, atr_multiplier=0.25, lookback=5):
+def detect_ifvg_with_gap_fill(df, atr_multiplier=0.25, lookback=50):
     atr = calculate_atr(df, period=200).fillna(0) * atr_multiplier
 
     bull_fvg = []  # To track bullish FVGs
