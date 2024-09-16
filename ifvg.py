@@ -76,91 +76,85 @@ def calculate_atr(df, period=200):
 #         return False  # No inversion detected
 
 # FVG/IFVG Detection Version 2, to detect every single IFVG within the scope of the chart
-def detect_strong_fvg_ifvg(df, atr_multiplier=0.25, lookback=5, signal_preference='Close', price_threshold=0.01,
-                           atr_threshold_multiplier=1.5):
+# Version 3: taking into account of candle stick wicks
+def detect_ifvg_with_gap_fill(df, atr_multiplier=0.25, lookback=5):
     atr = calculate_atr(df, period=200).fillna(0) * atr_multiplier
 
-    bull_fvg = []
-    bear_fvg = []
-    strong_inversions = []
+    bull_fvg = []  # To track bullish FVGs
+    bear_fvg = []  # To track bearish FVGs
+    inversions = []  # To store IFVGs
 
     # Use range(len(df)) to loop over DataFrame by row index
     for i in range(lookback, len(df)):
-        # FVG Up (Bullish) Condition
-        if (df['Low'].iloc[i] > df['High'].iloc[i - 2]) and (df['Close'].iloc[i - 1] > df['High'].iloc[i - 2]):
-            if abs(df['Low'].iloc[i] - df['High'].iloc[i - 2]) > atr.iloc[i]:
+        # Now using the highs and lows explicitly (wicks)
+        high_value = df['High'].iloc[i]
+        low_value = df['Low'].iloc[i]
+
+        # Bullish FVG: Low (current bar) > High (2 bars ago)
+        if (low_value > df['High'].iloc[i - 2]):
+            # Ensure the gap size is significant using ATR as a filter
+            if abs(low_value - df['High'].iloc[i - 2]) > atr.iloc[i]:
                 bull_fvg.append({
-                    'left_time': df.index[i - 1],
-                    'right_time': df.index[i],
-                    'low': df['Low'].iloc[i],
-                    'high': df['High'].iloc[i - 2],
-                    'mid': (df['Low'].iloc[i] + df['High'].iloc[i - 2]) / 2,
+                    'left_time': df.index[i - 1],  # The bar creating the FVG
+                    'right_time': df.index[i],  # The current bar
+                    'low': low_value,  # Current bar's low (FVG low)
+                    'high': df['High'].iloc[i - 2],  # 2 bars ago high (FVG high)
+                    'mid': (low_value + df['High'].iloc[i - 2]) / 2,
                     'direction': 1,  # bullish
-                    'state': 0
+                    'state': 0  # Not yet inverted
                 })
 
-        # FVG Down (Bearish) Condition
-        if (df['High'].iloc[i] < df['Low'].iloc[i - 2]) and (df['Close'].iloc[i - 1] < df['Low'].iloc[i - 2]):
-            if abs(df['Low'].iloc[i - 2] - df['High'].iloc[i]) > atr.iloc[i]:
+        # Bearish FVG: High (current bar) < Low (2 bars ago)
+        if (high_value < df['Low'].iloc[i - 2]):
+            if abs(df['Low'].iloc[i - 2] - high_value) > atr.iloc[i]:
                 bear_fvg.append({
-                    'left_time': df.index[i - 1],
-                    'right_time': df.index[i],
-                    'low': df['Low'].iloc[i - 2],
-                    'high': df['High'].iloc[i],
-                    'mid': (df['High'].iloc[i] + df['Low'].iloc[i - 2]) / 2,
+                    'left_time': df.index[i - 1],  # The bar creating the FVG
+                    'right_time': df.index[i],  # The current bar
+                    'low': df['Low'].iloc[i - 2],  # 2 bars ago low (FVG low)
+                    'high': high_value,  # Current bar's high (FVG high)
+                    'mid': (high_value + df['Low'].iloc[i - 2]) / 2,
                     'direction': -1,  # bearish
-                    'state': 0
+                    'state': 0  # Not yet inverted
                 })
 
-        # Check for strong inversions (IFVG)
+        # Now we check if any of the tracked FVGs have been inverted
+        # Bullish IFVG check: Price *must fully enter and cross the gap* below the FVG low
         for fvg in bull_fvg[:]:
-            if df['Low'].iloc[i] < fvg['low']:  # Inversion in bullish FVG
+            # Make sure that the price crosses the entire gap for inversion
+            if df['Low'].iloc[i] < fvg['high']:  # The low must fully enter and fill the gap
                 fvg['inversion_time'] = df.index[i]
-                fvg['state'] = 1  # Mark it as inverted
+                fvg['state'] = 1  # Mark as inverted
                 fvg['direction'] = -1  # Reverse the direction
+                inversions.append(fvg)  # Store the IFVG
+                bull_fvg.remove(fvg)  # Remove it from the list once inverted
 
-                # Calculate price movement after inversion
-                price_move = (fvg['low'] - df['Low'].iloc[i]) / fvg['low']
-
-                # Strong push criteria: price move > threshold * ATR
-                if price_move > price_threshold and abs(price_move) > atr.iloc[i] * atr_threshold_multiplier:
-                    strong_inversions.append(fvg)
-
-                bull_fvg.remove(fvg)
-
+        # Bearish IFVG check: Price *must fully enter and cross the gap* above the FVG high
         for fvg in bear_fvg[:]:
-            if df['High'].iloc[i] > fvg['high']:  # Inversion in bearish FVG
+            # Make sure that the price crosses the entire gap for inversion
+            if df['High'].iloc[i] > fvg['low']:  # The high must fully enter and fill the gap
                 fvg['inversion_time'] = df.index[i]
-                fvg['state'] = 1  # Mark it as inverted
+                fvg['state'] = 1  # Mark as inverted
                 fvg['direction'] = 1  # Reverse the direction
+                inversions.append(fvg)  # Store the IFVG
+                bear_fvg.remove(fvg)  # Remove it from the list once inverted
 
-                # Calculate price movement after inversion
-                price_move = (df['High'].iloc[i] - fvg['high']) / fvg['high']
-
-                # Strong push criteria: price move > threshold * ATR
-                if price_move > price_threshold and abs(price_move) > atr.iloc[i] * atr_threshold_multiplier:
-                    strong_inversions.append(fvg)
-
-                bear_fvg.remove(fvg)
-
-    # Return all strong inversions (IFVGs) detected
-    return strong_inversions
+    # Return all inversions (IFVGs) detected
+    return inversions
 
 
 # Download 5-minute data for the last 5 days
 gld = yf.download("GC=F", interval='5m', period='5d')
 
-# Run FVG/IFVG detection and filter for strong IFVGs
-strong_inversions = detect_strong_fvg_ifvg(gld, price_threshold=0.01, atr_threshold_multiplier=1.5)
+# Run FVG/IFVG detection and return all simple IFVGs
+simple_inversions = detect_ifvg_with_gap_fill(gld)
 
-# Output all strong IFVGs detected in the 5-day period
-if strong_inversions:
-    print("Strong IFVGs detected:")
-    for inv in strong_inversions:
-        print(f"Strong IFVG detected at {inv['inversion_time']}")
+# Output all IFVGs detected in the 5-day period
+if simple_inversions:
+    print("IFVGs detected:")
+    for inv in simple_inversions:
+        print(f"IFVG detected at {inv['inversion_time']}")
 else:
-    print("No strong IFVGs detected.")
-
+    print("No IFVGs detected.")
 
 
 # Define session start and end times
